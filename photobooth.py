@@ -1,5 +1,11 @@
 """
 Photobooth - welcome screen, then live preview, then capture, then print.
+
+Power on/off is handled by the arcade button wired to GPIO3 with the
+gpio-shutdown overlay (see config.txt) - pressing it triggers a real
+shutdown, and pressing it again wakes the Pi and boots straight back
+into this app via autostart. None of that involves this script.
+Photos are triggered by touchscreen taps.
 """
 import os
 import time
@@ -11,7 +17,6 @@ os.environ.setdefault("SDL_VIDEODRIVER", "wayland")
 import pygame
 from picamera2 import Picamera2
 from PIL import Image
-from gpiozero import Button
 from escpos.printer import File as EscposFile
 
 # --- Configuration ---
@@ -19,12 +24,13 @@ SCREEN_W, SCREEN_H = 800, 480
 SQUARE_SIZE = 480
 SQUARE_X = (SCREEN_W - SQUARE_SIZE) // 2  # 160
 SQUARE_Y = 0
+
 CAMERA_RES = (800, 480)
 CAPTURE_RES = (1920, 1080)
 COUNTDOWN_SECONDS = 3
+
 PRINTER_DEVICE = "/dev/usb/lp0"
 PRINTER_WIDTH_PX = 384
-BUTTON_PIN = 17
 
 ASSETS_DIR = Path.home() / "photobooth" / "assets"
 PHOTOS_DIR = Path.home() / "photobooth" / "captures"
@@ -71,9 +77,9 @@ def print_photo(image_path):
     p = EscposFile(PRINTER_DEVICE)
     try:
         # Reset and set density/heat each time
-        p._raw(b"\x1b\x40")              # ESC @ - initialize
+        p._raw(b"\x1b\x40")  # ESC @ - initialize
         time.sleep(0.1)
-        p._raw(b"\x12\x23\x0A")          # DC2 # 10 - density ~100%
+        p._raw(b"\x12\x23\x0A")  # DC2 # 10 - density ~100%
         p._raw(b"\x1b\x37\x07\x50\x02")  # ESC 7 - default heat params
         time.sleep(0.1)
 
@@ -83,7 +89,7 @@ def print_photo(image_path):
         top = (img.height - size) // 2
         img = img.crop((left, top, left + size, top + size))
         img = img.resize((PRINTER_WIDTH_PX, PRINTER_WIDTH_PX), Image.LANCZOS)
-        img = img.rotate(180)            # Flip 180 so it prints right-side-up
+        img = img.rotate(180)  # Flip 180 so it prints right-side-up
         img = img.convert("L")
 
         p.image(img, impl="bitImageRaster")
@@ -103,9 +109,6 @@ def main():
     )
     picam2.configure(preview_config)
     picam2.start()
-
-    # Button
-    button = Button(BUTTON_PIN, pull_up=True, bounce_time=0.05)
 
     # Pygame
     pygame.init()
@@ -132,14 +135,16 @@ def main():
     state = STATE_WELCOME
     state_start = time.time()
     last_capture_path = None
-    print("Photobooth running. Press ESC or Q to quit.")
+
+    print("Photobooth running. Tap the screen to take a photo. "
+          "Press the arcade button to shut down. Press ESC or Q to quit.")
 
     running = True
     while running:
         now = time.time()
         elapsed = now - state_start
-
         triggered = False
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -148,9 +153,6 @@ def main():
                     running = False
             elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN):
                 triggered = True
-
-        if button.is_pressed:
-            triggered = True
 
         if elapsed < DEBOUNCE:
             triggered = False
@@ -172,7 +174,6 @@ def main():
         elif state == STATE_COUNTDOWN:
             frame = picam2.capture_array("main")
             screen.blit(frame_to_square_surface(frame), (SQUARE_X, SQUARE_Y))
-
             remaining = COUNTDOWN_SECONDS - int(elapsed)
             if remaining > 0:
                 draw_text_top(screen, str(remaining), font_countdown, WHITE, y=10)
@@ -185,7 +186,6 @@ def main():
                 # Capture
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 last_capture_path = PHOTOS_DIR / f"photo_{ts}.jpg"
-
                 capture_config = picam2.create_still_configuration(
                     main={"size": CAPTURE_RES}
                 )
