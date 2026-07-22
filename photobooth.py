@@ -24,13 +24,13 @@ from PIL import Image
 SCREEN_W, SCREEN_H = 800, 480
 SQUARE_SIZE = 480
 
-# Keep the camera preview full-size and shift it left.
-SQUARE_X = 0
+# Keep the camera preview full-size and center it on the display.
+SQUARE_X = (SCREEN_W - SQUARE_SIZE) // 2
 SQUARE_Y = 0
 
-# Center the countdown in the 320-pixel area to the right of the preview.
-COUNTDOWN_CENTER_X = SQUARE_SIZE + (SCREEN_W - SQUARE_SIZE) // 2
-COUNTDOWN_CENTER_Y = SCREEN_H // 2
+# Overlay the countdown near the top center of the preview.
+COUNTDOWN_CENTER_X = SCREEN_W // 2
+COUNTDOWN_CENTER_Y = 65
 
 CAMERA_RES = (800, 480)
 CAPTURE_RES = (1920, 1080)
@@ -57,7 +57,7 @@ STATE_PRINTING = "printing"
 
 
 def frame_to_square_surface(frame):
-    """Center-crop an 800x480 camera frame to 480x480 for pygame."""
+    """Center-crop the camera frame and correct red/blue channel order."""
     crop_x_start = (frame.shape[1] - SQUARE_SIZE) // 2
     cropped = frame[
         :,
@@ -65,26 +65,18 @@ def frame_to_square_surface(frame):
         :
     ]
 
-    # The camera frame is provided in the correct channel order for this display.
-    return pygame.surfarray.make_surface(cropped.swapaxes(0, 1))
+    # Picamera2 and pygame can interpret RGB888/BGR888 names differently
+    # depending on the camera pipeline. Explicitly swap red and blue here.
+    corrected = cropped[:, :, [2, 1, 0]]
+
+    return pygame.surfarray.make_surface(corrected.swapaxes(0, 1))
 
 
 def draw_camera_layout(screen, frame):
-    """Draw the full-size preview on the left and a solid pink side panel."""
+    """Draw a pink background with the full-size camera preview centered."""
+    screen.fill(PINK)
     preview_surface = frame_to_square_surface(frame)
     screen.blit(preview_surface, (SQUARE_X, SQUARE_Y))
-
-    # Draw this after the preview so the side panel always remains pink.
-    pygame.draw.rect(
-        screen,
-        PINK,
-        pygame.Rect(
-            SQUARE_SIZE,
-            0,
-            SCREEN_W - SQUARE_SIZE,
-            SCREEN_H,
-        ),
-    )
 
 
 def crop_pygame_image_to_square(surface):
@@ -145,9 +137,9 @@ def draw_countdown(screen, number, font):
     visible_text = text_surface.subsurface(bounds).copy()
     visible_outline = outline_surface.subsurface(bounds).copy()
 
-    # The countdown must fit inside the 320-pixel side panel.
-    max_width = SCREEN_W - SQUARE_SIZE - 60
-    max_height = SCREEN_H - 80
+    # Keep the countdown compact so it does not cover much of the preview.
+    max_width = 140
+    max_height = 110
     scale = min(
         1.0,
         max_width / visible_text.get_width(),
@@ -263,11 +255,11 @@ def main():
 
     # Use DO.otf for both the numeric countdown and printing text.
     try:
-        font_countdown = pygame.font.Font(str(FONT_FILE), 220)
+        font_countdown = pygame.font.Font(str(FONT_FILE), 110)
         font_printing = pygame.font.Font(str(FONT_FILE), 60)
     except (FileNotFoundError, pygame.error) as error:
         print(f"DO.otf unavailable; using default font: {error}", flush=True)
-        font_countdown = pygame.font.Font(None, 220)
+        font_countdown = pygame.font.Font(None, 110)
         font_printing = pygame.font.Font(None, 60)
 
     debounce_seconds = 0.4
@@ -315,8 +307,6 @@ def main():
                     state_start = now
 
             elif state == STATE_PREVIEW:
-                screen.fill(PINK)
-
                 frame = picam2.capture_array("main")
                 draw_camera_layout(screen, frame)
 
@@ -325,8 +315,6 @@ def main():
                     state_start = now
 
             elif state == STATE_COUNTDOWN:
-                screen.fill(PINK)
-
                 frame = picam2.capture_array("main")
                 draw_camera_layout(screen, frame)
 
