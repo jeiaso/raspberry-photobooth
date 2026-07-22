@@ -38,7 +38,7 @@ ASSETS_DIR = BASE_DIR / "assets"
 PHOTOS_DIR = BASE_DIR / "captures"
 
 BACKGROUND_FILE = ASSETS_DIR / "screen.png"
-FONT_FILE = ASSETS_DIR / "BERKY.ttf"
+FONT_FILE = ASSETS_DIR / "DO.otf"
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -51,7 +51,7 @@ STATE_PRINTING = "printing"
 
 
 def frame_to_square_surface(frame):
-    """Center-crop an 800x480 RGB frame to 480x480."""
+    """Center-crop an 800x480 camera frame to 480x480 for pygame."""
     crop_x_start = (frame.shape[1] - SQUARE_SIZE) // 2
     cropped = frame[
         :,
@@ -59,7 +59,7 @@ def frame_to_square_surface(frame):
         :
     ]
 
-    # Picamera2 supplies RGB888, while pygame.surfarray expects the axes swapped.
+    # BGR888 is selected in Picamera2 because its memory order is RGB for pygame.
     return pygame.surfarray.make_surface(cropped.swapaxes(0, 1))
 
 
@@ -103,29 +103,62 @@ def draw_text_top(screen, text, font, color, y=20):
     screen.blit(text_surface, rect)
 
 
-def draw_countdown(screen, text, font):
-    """Center countdown glyphs using their visible pixel bounds."""
+def draw_countdown(screen, number, font):
+    """Draw a numeric countdown centered by the glyph's visible pixels."""
+    text = str(number)
     text_surface = font.render(text, True, WHITE)
     outline_surface = font.render(text, True, BLACK)
 
+    # Some display fonts include large invisible margins or unusual baselines.
+    # Use the visible glyph bounds so 3, 2, and 1 stay centered on-screen.
     bounds = text_surface.get_bounding_rect()
 
-    x = SCREEN_W // 2 - bounds.width // 2 - bounds.x
-    y = SCREEN_H // 2 - bounds.height // 2 - bounds.y
+    if bounds.width == 0 or bounds.height == 0:
+        raise RuntimeError(
+            f"The countdown font did not render the numeral {text!r}."
+        )
+
+    visible_text = text_surface.subsurface(bounds).copy()
+    visible_outline = outline_surface.subsurface(bounds).copy()
+
+    max_size = SQUARE_SIZE - 60
+    scale = min(
+        1.0,
+        max_size / visible_text.get_width(),
+        max_size / visible_text.get_height(),
+    )
+
+    if scale < 1.0:
+        scaled_size = (
+            max(1, int(visible_text.get_width() * scale)),
+            max(1, int(visible_text.get_height() * scale)),
+        )
+        visible_text = pygame.transform.smoothscale(
+            visible_text,
+            scaled_size,
+        )
+        visible_outline = pygame.transform.smoothscale(
+            visible_outline,
+            scaled_size,
+        )
+
+    rect = visible_text.get_rect(
+        center=(SCREEN_W // 2, SCREEN_H // 2)
+    )
 
     for offset_x, offset_y in (
-        (-5, 0),
-        (5, 0),
-        (0, -5),
-        (0, 5),
-        (-4, -4),
-        (4, -4),
-        (-4, 4),
-        (4, 4),
+        (-6, 0),
+        (6, 0),
+        (0, -6),
+        (0, 6),
+        (-5, -5),
+        (5, -5),
+        (-5, 5),
+        (5, 5),
     ):
-        screen.blit(outline_surface, (x + offset_x, y + offset_y))
+        screen.blit(visible_outline, rect.move(offset_x, offset_y))
 
-    screen.blit(text_surface, (x, y))
+    screen.blit(visible_text, rect)
 
 
 def print_photo(image_path):
@@ -175,7 +208,7 @@ def main():
     picam2 = Picamera2()
 
     preview_config = picam2.create_preview_configuration(
-        main={"size": CAMERA_RES, "format": "RGB888"},
+        main={"size": CAMERA_RES, "format": "BGR888"},
         transform=camera_transform,
     )
 
@@ -202,15 +235,13 @@ def main():
             (SCREEN_W, SCREEN_H),
         )
 
-    # Use the custom font for both the countdown and printing text.
-    # Countdown positioning uses visible glyph bounds so unusual font metrics
-    # do not push the numbers off-screen.
-    font_countdown = pygame.font.Font(str(FONT_FILE), 170)
-
+    # Use DO.otf for both the numeric countdown and printing text.
     try:
+        font_countdown = pygame.font.Font(str(FONT_FILE), 220)
         font_printing = pygame.font.Font(str(FONT_FILE), 60)
     except (FileNotFoundError, pygame.error) as error:
-        print(f"Custom font unavailable; using default font: {error}", flush=True)
+        print(f"DO.otf unavailable; using default font: {error}", flush=True)
+        font_countdown = pygame.font.Font(None, 220)
         font_printing = pygame.font.Font(None, 60)
 
     debounce_seconds = 0.4
@@ -284,7 +315,7 @@ def main():
                 if remaining > 0:
                     draw_countdown(
                         screen,
-                        str(remaining),
+                        remaining,
                         font_countdown,
                     )
                 else:
