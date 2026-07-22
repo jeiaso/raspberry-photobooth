@@ -42,6 +42,7 @@ FONT_FILE = ASSETS_DIR / "BERKY.ttf"
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
+PINK = (255, 182, 193)
 
 STATE_WELCOME = "welcome"
 STATE_PREVIEW = "preview"
@@ -100,6 +101,31 @@ def draw_text_top(screen, text, font, color, y=20):
         screen.blit(outline_surface, rect.move(offset_x, offset_y))
 
     screen.blit(text_surface, rect)
+
+
+def draw_countdown(screen, text, font):
+    """Center countdown glyphs using their visible pixel bounds."""
+    text_surface = font.render(text, True, WHITE)
+    outline_surface = font.render(text, True, BLACK)
+
+    bounds = text_surface.get_bounding_rect()
+
+    x = SCREEN_W // 2 - bounds.width // 2 - bounds.x
+    y = SCREEN_H // 2 - bounds.height // 2 - bounds.y
+
+    for offset_x, offset_y in (
+        (-5, 0),
+        (5, 0),
+        (0, -5),
+        (0, 5),
+        (-4, -4),
+        (4, -4),
+        (-4, 4),
+        (4, 4),
+    ):
+        screen.blit(outline_surface, (x + offset_x, y + offset_y))
+
+    screen.blit(text_surface, (x, y))
 
 
 def print_photo(image_path):
@@ -176,9 +202,10 @@ def main():
             (SCREEN_W, SCREEN_H),
         )
 
-    # The default pygame font reliably contains readable number glyphs.
-    # Your decorative font is still used for "Printing...".
-    font_countdown = pygame.font.Font(None, 170)
+    # Use the custom font for both the countdown and printing text.
+    # Countdown positioning uses visible glyph bounds so unusual font metrics
+    # do not push the numbers off-screen.
+    font_countdown = pygame.font.Font(str(FONT_FILE), 170)
 
     try:
         font_printing = pygame.font.Font(str(FONT_FILE), 60)
@@ -224,14 +251,15 @@ def main():
             if elapsed < debounce_seconds:
                 triggered = False
 
-            screen.blit(background, (0, 0))
-
             if state == STATE_WELCOME:
+                screen.blit(background, (0, 0))
                 if triggered:
                     state = STATE_PREVIEW
                     state_start = now
 
             elif state == STATE_PREVIEW:
+                screen.fill(PINK)
+
                 frame = picam2.capture_array("main")
                 screen.blit(
                     frame_to_square_surface(frame),
@@ -243,6 +271,8 @@ def main():
                     state_start = now
 
             elif state == STATE_COUNTDOWN:
+                screen.fill(PINK)
+
                 frame = picam2.capture_array("main")
                 screen.blit(
                     frame_to_square_surface(frame),
@@ -252,12 +282,10 @@ def main():
                 remaining = COUNTDOWN_SECONDS - int(elapsed)
 
                 if remaining > 0:
-                    draw_text_top(
+                    draw_countdown(
                         screen,
                         str(remaining),
                         font_countdown,
-                        WHITE,
-                        y=15,
                     )
                 else:
                     screen.fill(WHITE)
@@ -286,6 +314,8 @@ def main():
                         state_start = time.time()
 
             elif state == STATE_PRINTING:
+                screen.fill(PINK)
+
                 if last_capture_path and last_capture_path.exists():
                     photo = pygame.image.load(str(last_capture_path))
                     photo = crop_pygame_image_to_square(photo)
