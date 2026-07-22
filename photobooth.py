@@ -1,28 +1,29 @@
 """
-Photobooth - welcome screen, then live preview, then capture, then print.
+Photobooth - welcome screen, live preview, countdown, capture, and print.
 
-Power on/off is handled by the arcade button wired to GPIO3 with the
-gpio-shutdown overlay (see config.txt) - pressing it triggers a real
-shutdown, and pressing it again wakes the Pi and boots straight back
-into this app via autostart. None of that involves this script.
-Photos are triggered by touchscreen taps.
+The touchscreen triggers photos. The GPIO3 gpio-shutdown overlay handles the
+arcade power button outside of this script.
 """
+
 import os
 import time
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 os.environ.setdefault("SDL_VIDEODRIVER", "wayland")
 
 import pygame
+from escpos.printer import File as EscposFile
+from libcamera import Transform
 from picamera2 import Picamera2
 from PIL import Image
-from escpos.printer import File as EscposFile
+
 
 # --- Configuration ---
+
 SCREEN_W, SCREEN_H = 800, 480
 SQUARE_SIZE = 480
-SQUARE_X = (SCREEN_W - SQUARE_SIZE) // 2  # 160
+SQUARE_X = (SCREEN_W - SQUARE_SIZE) // 2
 SQUARE_Y = 0
 
 CAMERA_RES = (800, 480)
@@ -32,16 +33,16 @@ COUNTDOWN_SECONDS = 3
 PRINTER_DEVICE = "/dev/usb/lp0"
 PRINTER_WIDTH_PX = 384
 
-ASSETS_DIR = Path.home() / "photobooth" / "assets"
-PHOTOS_DIR = Path.home() / "photobooth" / "captures"
+BASE_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = BASE_DIR / "assets"
+PHOTOS_DIR = BASE_DIR / "captures"
+
 BACKGROUND_FILE = ASSETS_DIR / "screen.png"
 FONT_FILE = ASSETS_DIR / "BERKY.ttf"
 
-# Colors
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
-# State machine
 STATE_WELCOME = "welcome"
 STATE_PREVIEW = "preview"
 STATE_COUNTDOWN = "countdown"
@@ -49,181 +50,275 @@ STATE_PRINTING = "printing"
 
 
 def frame_to_square_surface(frame):
-    """Center-crop 800x480 camera frame to 480x480 and return as pygame surface."""
-    crop_x_start = (frame.shape[1] - 480) // 2
-    cropped = frame[:, crop_x_start:crop_x_start + 480, :]
-    return pygame.surfarray.make_surface(cropped.swapaxes(0, 1)[:, :, ::-1])
+    """Center-crop an 800x480 RGB frame to 480x480."""
+    crop_x_start = (frame.shape[1] - SQUARE_SIZE) // 2
+    cropped = frame[
+        :,
+        crop_x_start:crop_x_start + SQUARE_SIZE,
+        :
+    ]
+
+    # Picamera2 supplies RGB888, while pygame.surfarray expects the axes swapped.
+    return pygame.surfarray.make_surface(cropped.swapaxes(0, 1))
 
 
 def crop_pygame_image_to_square(surface):
-    """Center-crop a pygame surface to a square."""
-    w, h = surface.get_size()
-    size = min(w, h)
-    left = (w - size) // 2
-    top = (h - size) // 2
+    """Center-crop a pygame surface to a square and scale it for the display."""
+    width, height = surface.get_size()
+    size = min(width, height)
+    left = (width - size) // 2
+    top = (height - size) // 2
+
     cropped = pygame.Surface((size, size))
-    cropped.blit(surface, (0, 0), area=pygame.Rect(left, top, size, size))
+    cropped.blit(
+        surface,
+        (0, 0),
+        area=pygame.Rect(left, top, size, size),
+    )
     return pygame.transform.scale(cropped, (SQUARE_SIZE, SQUARE_SIZE))
 
 
 def draw_text_top(screen, text, font, color, y=20):
-    """Draw text horizontally centered at the top of the screen."""
-    surf = font.render(text, True, color)
-    rect = surf.get_rect(center=(SCREEN_W // 2, y + surf.get_height() // 2))
-    screen.blit(surf, rect)
+    """Draw centered text with a dark outline so it stays visible."""
+    text_surface = font.render(text, True, color)
+    outline_surface = font.render(text, True, BLACK)
+
+    rect = text_surface.get_rect(
+        center=(SCREEN_W // 2, y + text_surface.get_height() // 2)
+    )
+
+    for offset_x, offset_y in (
+        (-4, 0),
+        (4, 0),
+        (0, -4),
+        (0, 4),
+        (-3, -3),
+        (3, -3),
+        (-3, 3),
+        (3, 3),
+    ):
+        screen.blit(outline_surface, rect.move(offset_x, offset_y))
+
+    screen.blit(text_surface, rect)
 
 
 def print_photo(image_path):
-    p = EscposFile(PRINTER_DEVICE)
+    """Crop, resize, rotate, and print one photo."""
+    printer = EscposFile(PRINTER_DEVICE)
+
     try:
-        # Reset and set density/heat each time
-        p._raw(b"\x1b\x40")  # ESC @ - initialize
-        time.sleep(0.1)
-        p._raw(b"\x12\x23\x0A")  # DC2 # 10 - density ~100%
-        p._raw(b"\x1b\x37\x07\x50\x02")  # ESC 7 - default heat params
+        printer._raw(b"\x1b\x40")
         time.sleep(0.1)
 
-        img = Image.open(image_path)
-        size = min(img.width, img.height)
-        left = (img.width - size) // 2
-        top = (img.height - size) // 2
-        img = img.crop((left, top, left + size, top + size))
-        img = img.resize((PRINTER_WIDTH_PX, PRINTER_WIDTH_PX), Image.LANCZOS)
-        img = img.rotate(180)  # Flip 180 so it prints right-side-up
-        img = img.convert("L")
+        printer._raw(b"\x12\x23\x0A")
+        printer._raw(b"\x1b\x37\x07\x50\x02")
+        time.sleep(0.1)
 
-        p.image(img, impl="bitImageRaster")
-        p.text("\n\n\n\n")
+        with Image.open(image_path) as source:
+            image = source.copy()
+
+        size = min(image.width, image.height)
+        left = (image.width - size) // 2
+        top = (image.height - size) // 2
+
+        image = image.crop((left, top, left + size, top + size))
+        image = image.resize(
+            (PRINTER_WIDTH_PX, PRINTER_WIDTH_PX),
+            Image.Resampling.LANCZOS,
+        )
+
+        # Keep this rotation if the printer physically outputs photos upside-down.
+        image = image.rotate(180)
+        image = image.convert("L")
+
+        printer.image(image, impl="bitImageRaster")
+        printer.text("\n\n\n\n")
         time.sleep(2)
+
     finally:
-        p.close()
+        printer.close()
 
 
 def main():
     PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Camera
+    # hflip=True reverses the existing mirror effect for both the live preview
+    # and the saved/printed photo.
+    camera_transform = Transform(hflip=True)
+
     picam2 = Picamera2()
+
     preview_config = picam2.create_preview_configuration(
-        main={"size": CAMERA_RES, "format": "RGB888"}
+        main={"size": CAMERA_RES, "format": "RGB888"},
+        transform=camera_transform,
     )
+
+    capture_config = picam2.create_still_configuration(
+        main={"size": CAPTURE_RES},
+        transform=camera_transform,
+    )
+
     picam2.configure(preview_config)
     picam2.start()
 
-    # Pygame
     pygame.init()
     screen = pygame.display.set_mode(
         (SCREEN_W, SCREEN_H),
-        pygame.FULLSCREEN | pygame.NOFRAME
+        pygame.FULLSCREEN | pygame.NOFRAME,
     )
     pygame.display.set_caption("Photobooth")
     pygame.mouse.set_visible(False)
 
-    # Load background
     background = pygame.image.load(str(BACKGROUND_FILE)).convert()
     if background.get_size() != (SCREEN_W, SCREEN_H):
-        background = pygame.transform.scale(background, (SCREEN_W, SCREEN_H))
+        background = pygame.transform.scale(
+            background,
+            (SCREEN_W, SCREEN_H),
+        )
 
-    # Load custom font at multiple sizes
-    font_countdown = pygame.font.Font(str(FONT_FILE), 120)
-    font_printing = pygame.font.Font(str(FONT_FILE), 60)
+    # The default pygame font reliably contains readable number glyphs.
+    # Your decorative font is still used for "Printing...".
+    font_countdown = pygame.font.Font(None, 170)
 
-    # Debounce: ignore presses immediately after state change
-    DEBOUNCE = 0.4
+    try:
+        font_printing = pygame.font.Font(str(FONT_FILE), 60)
+    except (FileNotFoundError, pygame.error) as error:
+        print(f"Custom font unavailable; using default font: {error}", flush=True)
+        font_printing = pygame.font.Font(None, 60)
 
+    debounce_seconds = 0.4
     clock = pygame.time.Clock()
+
     state = STATE_WELCOME
     state_start = time.time()
     last_capture_path = None
 
-    print("Photobooth running. Tap the screen to take a photo. "
-          "Press the arcade button to shut down. Press ESC or Q to quit.")
+    print(
+        "Photobooth running. Tap the screen to take a photo. "
+        "Press ESC or Q to quit.",
+        flush=True,
+    )
 
     running = True
-    while running:
-        now = time.time()
-        elapsed = now - state_start
-        triggered = False
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                    running = False
-            elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN):
-                triggered = True
-
-        if elapsed < DEBOUNCE:
+    try:
+        while running:
+            now = time.time()
+            elapsed = now - state_start
             triggered = False
 
-        screen.blit(background, (0, 0))
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
 
-        if state == STATE_WELCOME:
-            if triggered:
-                state = STATE_PREVIEW
-                state_start = now
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                        running = False
 
-        elif state == STATE_PREVIEW:
-            frame = picam2.capture_array("main")
-            screen.blit(frame_to_square_surface(frame), (SQUARE_X, SQUARE_Y))
-            if triggered:
-                state = STATE_COUNTDOWN
-                state_start = now
+                elif event.type in (
+                    pygame.MOUSEBUTTONDOWN,
+                    pygame.FINGERDOWN,
+                ):
+                    triggered = True
 
-        elif state == STATE_COUNTDOWN:
-            frame = picam2.capture_array("main")
-            screen.blit(frame_to_square_surface(frame), (SQUARE_X, SQUARE_Y))
-            remaining = COUNTDOWN_SECONDS - int(elapsed)
-            if remaining > 0:
-                draw_text_top(screen, str(remaining), font_countdown, WHITE, y=10)
-            else:
-                # Flash
-                screen.fill(WHITE)
-                pygame.display.flip()
-                pygame.time.wait(80)
+            if elapsed < debounce_seconds:
+                triggered = False
 
-                # Capture
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                last_capture_path = PHOTOS_DIR / f"photo_{ts}.jpg"
-                capture_config = picam2.create_still_configuration(
-                    main={"size": CAPTURE_RES}
+            screen.blit(background, (0, 0))
+
+            if state == STATE_WELCOME:
+                if triggered:
+                    state = STATE_PREVIEW
+                    state_start = now
+
+            elif state == STATE_PREVIEW:
+                frame = picam2.capture_array("main")
+                screen.blit(
+                    frame_to_square_surface(frame),
+                    (SQUARE_X, SQUARE_Y),
                 )
-                picam2.switch_mode_and_capture_file(
-                    capture_config, str(last_capture_path)
+
+                if triggered:
+                    state = STATE_COUNTDOWN
+                    state_start = now
+
+            elif state == STATE_COUNTDOWN:
+                frame = picam2.capture_array("main")
+                screen.blit(
+                    frame_to_square_surface(frame),
+                    (SQUARE_X, SQUARE_Y),
                 )
-                picam2.stop()
-                picam2.configure(preview_config)
-                picam2.start()
 
-                state = STATE_PRINTING
-                state_start = time.time()
+                remaining = COUNTDOWN_SECONDS - int(elapsed)
 
-        elif state == STATE_PRINTING:
-            if last_capture_path and last_capture_path.exists():
-                photo = pygame.image.load(str(last_capture_path))
-                photo = crop_pygame_image_to_square(photo)
-                screen.blit(photo, (SQUARE_X, SQUARE_Y))
-            draw_text_top(screen, "Printing...", font_printing, WHITE, y=10)
+                if remaining > 0:
+                    draw_text_top(
+                        screen,
+                        str(remaining),
+                        font_countdown,
+                        WHITE,
+                        y=15,
+                    )
+                else:
+                    screen.fill(WHITE)
+                    pygame.display.flip()
+                    pygame.time.wait(80)
 
-            if elapsed < 0.1:
-                pygame.display.flip()
-                try:
-                    if last_capture_path:
-                        print_photo(last_capture_path)
-                except Exception as e:
-                    print(f"Print error: {e}")
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    last_capture_path = (
+                        PHOTOS_DIR / f"photo_{timestamp}.jpg"
+                    )
 
-            if elapsed >= 5.0:
-                state = STATE_WELCOME
-                state_start = time.time()
+                    try:
+                        # Picamera2 switches to still mode, captures the file,
+                        # and switches back to the preview configuration.
+                        picam2.switch_mode_and_capture_file(
+                            capture_config,
+                            str(last_capture_path),
+                        )
 
-        pygame.display.flip()
-        clock.tick(30)
+                        state = STATE_PRINTING
+                        state_start = time.time()
 
-    picam2.stop()
-    pygame.quit()
-    print("Photobooth stopped.")
+                    except Exception as error:
+                        print(f"Capture error: {error}", flush=True)
+                        state = STATE_PREVIEW
+                        state_start = time.time()
+
+            elif state == STATE_PRINTING:
+                if last_capture_path and last_capture_path.exists():
+                    photo = pygame.image.load(str(last_capture_path))
+                    photo = crop_pygame_image_to_square(photo)
+                    screen.blit(photo, (SQUARE_X, SQUARE_Y))
+
+                draw_text_top(
+                    screen,
+                    "Printing...",
+                    font_printing,
+                    WHITE,
+                    y=15,
+                )
+
+                if elapsed < 0.1:
+                    pygame.display.flip()
+
+                    try:
+                        if last_capture_path:
+                            print_photo(last_capture_path)
+                    except Exception as error:
+                        print(f"Print error: {error}", flush=True)
+
+                if elapsed >= 5.0:
+                    state = STATE_WELCOME
+                    state_start = time.time()
+
+            pygame.display.flip()
+            clock.tick(30)
+
+    finally:
+        picam2.stop()
+        pygame.quit()
+        print("Photobooth stopped.", flush=True)
 
 
 if __name__ == "__main__":
